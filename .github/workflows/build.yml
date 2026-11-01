@@ -1,0 +1,27 @@
+name: Build Windows
+
+# Builds nook.exe on GitHub's own Windows machines, so nothing has to be
+# installed locally. Run it from the Actions tab (Run workflow), then
+# download the "nook-windows" artifact from the finished run.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Upload nook.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: nook-windows
+          path: target/release/nook.exe
+      - name: Tests (informational)
+        run: cargo test --workspace
+        continue-on-error: true
