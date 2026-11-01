@@ -24,7 +24,7 @@ use nook_ui::bento;
 use nook_ui::geometry::Squircle;
 use nook_ui::module::{Badge, Module, Registry};
 use nook_ui::paint;
-use nook_ui::shell::{Shell, ShellMetrics, ShellOutput};
+use nook_ui::shell::{Dock, OpenOn, Shell, ShellMetrics, ShellOutput};
 use nook_ui::shell_state::ShellTimings;
 use nook_ui::theme::{self, FALLBACK_ACCENT, SIZE_BODY, SIZE_LABEL, Theme, ThemeMode};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -240,7 +240,7 @@ impl NookApp {
             cfg.usage_stats,
             builtin,
         );
-        Ok(Self {
+        let mut app = Self {
             cfg,
             hwnd,
             shell,
@@ -279,7 +279,25 @@ impl NookApp {
             _instance: instance,
             #[cfg(feature = "debug-overlay")]
             overlay: Default::default(),
-        })
+        };
+        app.sync_shell_cfg();
+        Ok(app)
+    }
+
+    /// Pushes the position and open-on settings to the shell and the tray.
+    fn sync_shell_cfg(&mut self) {
+        let cfg = &self.cfg;
+        self.shell.placement = cfg.placement;
+        self.shell.dock = cfg.dock;
+        self.shell.dock_y = cfg.dock_y.clamp(0.0, 1.0);
+        self.shell.free = cfg
+            .free_placed
+            .then(|| (cfg.free_x.clamp(0.0, 1.0), cfg.free_y.clamp(0.0, 1.0)));
+        self.shell.state.click_only = cfg.open_on == OpenOn::Click;
+        if let Some(t) = &self.tray {
+            t.set_dock(cfg.dock);
+            t.set_click_open(cfg.open_on == OpenOn::Click);
+        }
     }
 
     fn dark(&self) -> bool {
@@ -400,6 +418,30 @@ impl NookApp {
                 self.cfg.launch_at_startup = !self.cfg.launch_at_startup;
                 self.apply_startup();
             }
+            TrayCommand::DockLeft | TrayCommand::DockRight => {
+                let side = if cmd == TrayCommand::DockLeft {
+                    Dock::Left
+                } else {
+                    Dock::Right
+                };
+                self.cfg.dock = if self.cfg.dock == side { Dock::Off } else { side };
+                self.sync_shell_cfg();
+                self.save_config();
+            }
+            TrayCommand::ToggleClickOpen => {
+                self.cfg.open_on = match self.cfg.open_on {
+                    OpenOn::Hover => OpenOn::Click,
+                    OpenOn::Click => OpenOn::Hover,
+                };
+                self.sync_shell_cfg();
+                self.save_config();
+            }
+            TrayCommand::ResetPosition => {
+                self.cfg.free_placed = false;
+                self.cfg.dock_y = crate::config::DEFAULT_DOCK_Y;
+                self.sync_shell_cfg();
+                self.save_config();
+            }
             TrayCommand::Update => self.updater.install(),
             TrayCommand::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
@@ -423,7 +465,13 @@ impl NookApp {
             return;
         };
         let scale = window::dpi(self.hwnd) as f32 / 96.0;
-        let h = (self.shell.window_size().y * scale).ceil() as i32;
+        // A notch parked at the top edge needs only a strip; one that was
+        // dragged or docked needs the whole work area to move in.
+        let h = if self.shell.needs_full_window() {
+            mon.work.height()
+        } else {
+            (self.shell.window_size().y * scale).ceil() as i32
+        };
         let rect = (mon.work.left, mon.work.top, mon.work.width(), h);
         if self.anchor != Some(rect) {
             match window::set_rect(self.hwnd, rect.0, rect.1, rect.2, rect.3) {
@@ -577,6 +625,20 @@ impl NookApp {
             }
             hit.set_shape(HitShape { polygons });
         }
+        // With a screen-sized window, only the drawn shape can be covered.
+        let cover = shape.filter(|_| self.shell.needs_full_window()).map(|s| {
+            let (ox, oy) = self
+                .anchor
+                .map(|(x, y, _, _)| (x as f32, y as f32))
+                .unwrap_or_default();
+            (
+                (ox + s.rect.min.x * ppp) as i32,
+                (oy + s.rect.min.y * ppp) as i32,
+                (s.rect.width() * ppp) as i32,
+                (s.rect.height() * ppp) as i32,
+            )
+        });
+        window::set_cover_rect(cover);
         self.pushed = Some((outline, extra));
         self.shape_dirty = false;
     }
@@ -1174,6 +1236,17 @@ impl eframe::App for NookApp {
             },
         );
 
+        if out.moved {
+            // Dropped after a drag: remember where.
+            if self.shell.dock.is_on() {
+                self.cfg.dock_y = self.shell.dock_y;
+            } else if let Some((x, y)) = self.shell.free {
+                self.cfg.free_placed = true;
+                self.cfg.free_x = x;
+                self.cfg.free_y = y;
+            }
+            self.save_config();
+        }
         if let Some(id) = clicked {
             self.stats.tool(id);
         }
@@ -1220,7 +1293,7 @@ impl eframe::App for NookApp {
         }
         if settings_out.changed {
             self.shell.timings = timings(&self.cfg);
-            self.shell.placement = self.cfg.placement;
+            self.sync_shell_cfg();
             self.watcher.set_monitor_mode(self.cfg.monitor);
             nook_modules::plugins::set_dev_mode(self.cfg.plugin_dev);
             self.stats.set_enabled(self.cfg.usage_stats);

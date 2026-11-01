@@ -42,6 +42,8 @@ pub struct ShellState {
     hover_since: Option<f64>,
     left_since: Option<f64>,
     closed_at: Option<f64>,
+    /// Only a click opens the panel; resting the pointer on it does not.
+    pub click_only: bool,
 }
 
 impl ShellState {
@@ -104,7 +106,7 @@ impl ShellState {
         let mut wake_at = None;
         if hovered {
             self.left_since = None;
-            if !self.open {
+            if !self.open && !self.click_only {
                 let since = *self.hover_since.get_or_insert(now);
                 if now - since >= t.hover_delay {
                     self.open_now();
@@ -194,6 +196,21 @@ mod tests {
         let out = s.update(2.45, false, &T);
         assert!(!out.shell_open);
         assert_eq!(out.wake_at, None, "fully idle once collapsed");
+    }
+
+    #[test]
+    fn click_only_ignores_hover() {
+        let mut s = ShellState {
+            click_only: true,
+            ..ShellState::default()
+        };
+        s.update(0.0, true, &T);
+        let out = s.update(1.0, true, &T);
+        assert!(!out.shell_open && !s.is_hovering_closed());
+        // A click pins it open, as before.
+        s.toggle_pin(1.0);
+        let out = s.update(1.1, false, &T);
+        assert!(out.shell_open && out.content_open);
     }
 
     #[test]

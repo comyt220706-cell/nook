@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use crossbeam_channel::Sender;
 use nook_ui::geometry::Squircle;
+use nook_ui::shell::Dock;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
@@ -12,6 +13,14 @@ pub enum TrayCommand {
     TogglePin,
     ToggleOnTop,
     ToggleStartup,
+    /// Hide to the left edge (or stop doing so).
+    DockLeft,
+    /// Hide to the right edge (or stop doing so).
+    DockRight,
+    /// Switch between opening on hover and on click.
+    ToggleClickOpen,
+    /// Back to the top edge, un-dragged.
+    ResetPosition,
     /// Download and install the release offered in the menu.
     Update,
     Quit,
@@ -23,6 +32,9 @@ pub struct Tray {
     pin: CheckMenuItem,
     on_top: CheckMenuItem,
     startup: CheckMenuItem,
+    dock_left: CheckMenuItem,
+    dock_right: CheckMenuItem,
+    click_open: CheckMenuItem,
     /// "Update to x.y.z", at the top of the menu while an update is offered.
     update: MenuItem,
     update_sep: PredefinedMenuItem,
@@ -43,6 +55,12 @@ impl Tray {
         let on_top = CheckMenuItem::with_id("ontop", "Always on top", true, on_top_on, None);
         let startup =
             CheckMenuItem::with_id("startup", "Launch at startup", true, startup_on, None);
+        let dock_left =
+            CheckMenuItem::with_id("dockleft", "Hide to left edge", true, false, None);
+        let dock_right =
+            CheckMenuItem::with_id("dockright", "Hide to right edge", true, false, None);
+        let click_open = CheckMenuItem::with_id("clickopen", "Click to open", true, false, None);
+        let reset = MenuItem::with_id("resetpos", "Reset position", true, None);
         let quit = MenuItem::with_id("quit", "Quit Nook", true, None);
         let menu = Menu::new();
         menu.append_items(&[
@@ -50,6 +68,11 @@ impl Tray {
             &pin,
             &on_top,
             &startup,
+            &PredefinedMenuItem::separator(),
+            &dock_left,
+            &dock_right,
+            &click_open,
+            &reset,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
@@ -61,6 +84,10 @@ impl Tray {
                 "pin" => TrayCommand::TogglePin,
                 "ontop" => TrayCommand::ToggleOnTop,
                 "startup" => TrayCommand::ToggleStartup,
+                "dockleft" => TrayCommand::DockLeft,
+                "dockright" => TrayCommand::DockRight,
+                "clickopen" => TrayCommand::ToggleClickOpen,
+                "resetpos" => TrayCommand::ResetPosition,
                 "update" => TrayCommand::Update,
                 "quit" => TrayCommand::Quit,
                 _ => return,
@@ -82,6 +109,9 @@ impl Tray {
             pin,
             on_top,
             startup,
+            dock_left,
+            dock_right,
+            click_open,
             update: MenuItem::with_id("update", "Update", true, None),
             update_sep: PredefinedMenuItem::separator(),
             update_shown: None,
@@ -122,6 +152,15 @@ impl Tray {
 
     pub fn set_startup(&self, on: bool) {
         self.startup.set_checked(on);
+    }
+
+    pub fn set_dock(&self, dock: Dock) {
+        self.dock_left.set_checked(dock == Dock::Left);
+        self.dock_right.set_checked(dock == Dock::Right);
+    }
+
+    pub fn set_click_open(&self, on: bool) {
+        self.click_open.set_checked(on);
     }
 }
 

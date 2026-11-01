@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use nook_ui::module::TileSize;
-use nook_ui::shell::Placement;
+use nook_ui::shell::{Dock, OpenOn, Placement};
 use nook_ui::theme::{Look, ThemeMode, parse_hex};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -100,6 +100,17 @@ pub struct Config {
     pub grain_size: GrainSize,
     /// Top-left corner, top center or top-right corner.
     pub placement: Placement,
+    /// What opens the panel: resting the pointer on the pill, or a click.
+    pub open_on: OpenOn,
+    /// Tuck into the left or right screen edge while idle.
+    pub dock: Dock,
+    /// Where along the dock edge the tab sits, 0 = top, 1 = bottom.
+    pub dock_y: f32,
+    /// The notch was dragged somewhere: `free_x`/`free_y` (fractions of the
+    /// screen's free room) replace `placement`.
+    pub free_placed: bool,
+    pub free_x: f32,
+    pub free_y: f32,
     /// Above all windows (true) or behind them.
     pub on_top: bool,
     /// Fade the notch out while a fullscreen app (game, video) is in front
@@ -136,6 +147,12 @@ impl Default for Config {
             grain: DEFAULT_GRAIN,
             grain_size: GrainSize::Fine,
             placement: Placement::Center,
+            open_on: OpenOn::Hover,
+            dock: Dock::Off,
+            dock_y: DEFAULT_DOCK_Y,
+            free_placed: false,
+            free_x: 0.5,
+            free_y: 0.0,
             on_top: true,
             hide_in_fullscreen: false,
             hover_delay_ms: 120,
@@ -161,6 +178,7 @@ impl Default for Config {
 
 pub const DEFAULT_GLASS_OPACITY: u8 = 70;
 pub const DEFAULT_GRAIN: u8 = 35;
+pub const DEFAULT_DOCK_Y: f32 = 0.35;
 
 impl Config {
     /// The styling settings as the theme takes them.
@@ -284,6 +302,19 @@ mod tests {
         assert_eq!(cfg.renderer, Renderer::OpenGl);
         let old: Config = toml::from_str("theme = \"dark\"").expect("parse");
         assert_eq!(old.renderer, Renderer::Auto);
+    }
+
+    #[test]
+    fn dock_and_open_on_parse_and_default() {
+        let cfg: Config =
+            toml::from_str("dock = \"left\"\nopen_on = \"click\"\nfree_placed = true").expect("parse");
+        assert_eq!(cfg.dock, Dock::Left);
+        assert_eq!(cfg.open_on, OpenOn::Click);
+        assert!(cfg.free_placed);
+        let old: Config = toml::from_str("theme = \"dark\"").expect("parse");
+        assert_eq!(old.dock, Dock::Off);
+        assert_eq!(old.open_on, OpenOn::Hover);
+        assert!(!old.free_placed);
     }
 
     #[test]

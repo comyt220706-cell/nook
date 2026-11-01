@@ -22,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
     WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use windows::core::BOOL;
 
 /// A window handle that can cross threads. Win32 handles are plain integers
@@ -362,6 +362,31 @@ fn refresh_frame(hwnd: Hwnd) -> Result<()> {
     .api("SetWindowPos(FRAMECHANGED)")
 }
 
+/// Screen rectangle (x, y, w, h) that [`is_covered`] checks instead of the
+/// whole window. A window that spans the screen would otherwise count every
+/// other always-on-top window as covering it.
+static COVER: [AtomicI32; 4] = [
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+];
+static COVER_SET: AtomicBool = AtomicBool::new(false);
+
+/// Narrows [`is_covered`] to `rect` (the drawn shape), or back to the whole
+/// window with `None`.
+pub fn set_cover_rect(rect: Option<(i32, i32, i32, i32)>) {
+    match rect {
+        Some((x, y, w, h)) => {
+            for (slot, v) in COVER.iter().zip([x, y, w, h]) {
+                slot.store(v, Ordering::Relaxed);
+            }
+            COVER_SET.store(true, Ordering::Relaxed);
+        }
+        None => COVER_SET.store(false, Ordering::Relaxed),
+    }
+}
+
 /// Whether the window lost its place at the top: the topmost bit was
 /// dropped, or a visible topmost window of another process sits above it
 /// and overlaps it. Read-only, safe from any thread.
@@ -370,8 +395,18 @@ pub fn is_covered(hwnd: Hwnd) -> bool {
     if !is_topmost(hwnd) {
         return true;
     }
-    let Ok(ours) = window_rect(hwnd) else {
-        return false;
+    let ours = if COVER_SET.load(Ordering::Relaxed) {
+        (
+            COVER[0].load(Ordering::Relaxed),
+            COVER[1].load(Ordering::Relaxed),
+            COVER[2].load(Ordering::Relaxed),
+            COVER[3].load(Ordering::Relaxed),
+        )
+    } else {
+        let Ok(rect) = window_rect(hwnd) else {
+            return false;
+        };
+        rect
     };
     // SAFETY: read-only z-order walk; stale handles only make calls fail.
     unsafe {
