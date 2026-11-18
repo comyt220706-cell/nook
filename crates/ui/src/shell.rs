@@ -89,6 +89,9 @@ struct Pose {
     side: Dock,
     /// Height of the closed shape (the room above the bottom edge).
     rest_h: f32,
+    /// Where the OS window's top-left sits inside the area the shape moves
+    /// in; the shape is returned in window coordinates.
+    origin: Vec2,
 }
 
 impl Pose {
@@ -99,8 +102,22 @@ impl Pose {
             hide: 0.0,
             side: Dock::Off,
             rest_h,
+            origin: Vec2::ZERO,
         }
     }
+}
+
+/// How much of the screen the OS window covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowMode {
+    /// A strip across the top of the work area (the notch is on the top edge).
+    Strip,
+    /// Just big enough for the notch where it rests, open or closed. Small
+    /// windows keep the compositor's blur cheap.
+    Tight,
+    /// The whole work area, only while the notch is being dragged or is
+    /// still travelling.
+    Full,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -207,6 +224,17 @@ pub struct Shell {
     /// The notch is still springing back to the top edge, so the OS window
     /// must stay tall until it gets there.
     settling: bool,
+    /// Being dragged, or still travelling to a new place: the OS window
+    /// covers the whole work area meanwhile.
+    moving: bool,
+    /// Work area in points, set by the app each frame (origin at its
+    /// top-left). The shape moves inside it.
+    pub area: Option<Rect>,
+    /// Top-left of the OS window inside `area`, in points.
+    pub origin: Vec2,
+    prev_origin: Vec2,
+    /// Pointer offset inside the shape (area points) while dragging.
+    grab: Option<Vec2>,
     /// Treat the shell as hovered whatever the pointer does (typing in it,
     /// files being dragged over it).
     pub hold_open: bool,
@@ -234,6 +262,11 @@ impl Shell {
             free: None,
             dock_side: Dock::Left,
             settling: false,
+            moving: false,
+            area: None,
+            origin: Vec2::ZERO,
+            prev_origin: Vec2::ZERO,
+            grab: None,
             hold_open: false,
             expanded_override: None,
             tall: metrics.expanded.y,
@@ -259,10 +292,41 @@ impl Shell {
         m.window_size()
     }
 
-    /// Whether the OS window must cover the whole work area. At the top edge
-    /// a strip is enough; anywhere else the shape needs room to move.
-    pub fn needs_full_window(&self) -> bool {
-        self.dock.is_on() || self.free.is_some() || self.settling
+    /// What the OS window should cover right now.
+    pub fn window_mode(&self) -> WindowMode {
+        let top_edge = self.free.is_none() && !self.dock.is_on();
+        if self.settling || self.moving {
+            WindowMode::Full
+        } else if top_edge {
+            WindowMode::Strip
+        } else {
+            WindowMode::Tight
+        }
+    }
+
+    /// Smallest rectangle of `area` (work-area points) that holds the notch
+    /// at rest: the open panel with its spring overshoot, and the closed
+    /// shape (the tab, when docked).
+    pub fn rest_bounds(&self, area: Rect) -> Rect {
+        let base = self.base_size();
+        let (fx, fy) = self.target_anchor();
+        let open_pose = Pose {
+            fx,
+            fy,
+            hide: 0.0,
+            side: self.dock_side,
+            rest_h: base.y,
+            origin: Vec2::ZERO,
+        };
+        let panel_size = vec2(self.expanded().x, self.tall.max(self.expanded().y));
+        let panel = self.shape_at(area, panel_size, 1.0, open_pose).rect;
+        let closed_pose = Pose {
+            hide: if self.dock.is_on() { 1.0 } else { 0.0 },
+            ..open_pose
+        };
+        let closed = self.shape_at(area, base, 0.0, closed_pose).rect;
+        let room = vec2(panel.width() * 0.06 + 8.0, panel.height() * 0.06 + 8.0);
+        panel.union(closed).expand2(room).intersect(area)
     }
 
     /// Size of the closed shape: the pill, or the tab of a docked notch.
@@ -330,7 +394,7 @@ impl Shell {
         // Corners morph from a circular capsule (pill) to a squircle (panel).
         let exponent = lerp(2.0, CORNER_EXPONENT, progress.clamp(0.0, 1.0));
         Squircle::new(
-            Rect::from_min_size(pos2(left, top), size),
+            Rect::from_min_size(pos2(left, top) - pose.origin, size),
             radius.min(size.x.min(size.y) * 0.5),
         )
         .with_exponent(exponent)
@@ -349,9 +413,22 @@ impl Shell {
         content: impl FnOnce(&mut Ui, &ContentCtx),
     ) -> ShellOutput {
         let ctx = ui.ctx().clone();
-        let window = ctx.content_rect();
+        let real_window = ctx.content_rect();
         let now = ctx.input(|i| i.time);
         let m = self.metrics;
+
+        // On the top edge the shape lives in the window's own strip. Anywhere
+        // else it moves in the whole work area, and the (smaller) window is
+        // just a viewport onto it at `origin`.
+        let strip = self.free.is_none() && !self.dock.is_on() && !self.settling;
+        let (window, origin) = match self.area {
+            Some(area) if !strip => (area, self.origin),
+            _ => (real_window, Vec2::ZERO),
+        };
+        // The window moved or resized since the last frame: the pointer
+        // position egui holds is still in the old window's coordinates.
+        let window_changed = origin != self.prev_origin;
+        self.prev_origin = origin;
 
         let hovered = !hidden
             && (self.hold_open
@@ -383,20 +460,32 @@ impl Shell {
         }
         if dragging {
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-            if self.free.is_none() && !self.dock.is_on() && !self.settling {
-                // First move of a notch still on the top edge: the window
-                // grows to the whole screen first, then follows the pointer.
+            if strip {
+                // First move of a notch still on the top edge: it becomes
+                // free, the window grows to the whole screen, and the
+                // pointer takes over from the next frame.
                 self.free = Some((self.placement.frac(), 0.0));
-            } else if let Some(cur) = self.last_shape.map(|s| s.rect) {
+                self.grab = None;
+            } else if let (Some(cur), Some(pointer), false) = (
+                self.last_shape.map(|s| s.rect.translate(origin)),
+                ctx.input(|i| i.pointer.interact_pos()),
+                window_changed,
+            ) {
+                // Absolute: the shape keeps the spot it was grabbed at, so
+                // a window resize in the middle cannot make it jump.
+                let at = pointer.to_vec2() + origin;
+                let grab = *self.grab.get_or_insert(at - cur.min.to_vec2());
+                let left = at.x - grab.x;
+                let top = at.y - grab.y;
                 let (lo_x, hi_x) = self.x_range(window, cur.width());
                 let (lo_y, hi_y) = self.y_range(window, base.y);
                 let fx = if hi_x > lo_x {
-                    ((cur.min.x + drag.x - lo_x) / (hi_x - lo_x)).clamp(0.0, 1.0)
+                    ((left - lo_x) / (hi_x - lo_x)).clamp(0.0, 1.0)
                 } else {
                     0.5
                 };
                 let fy = if hi_y > lo_y {
-                    ((cur.min.y + drag.y - lo_y) / (hi_y - lo_y)).clamp(0.0, 1.0)
+                    ((top - lo_y) / (hi_y - lo_y)).clamp(0.0, 1.0)
                 } else {
                     0.0
                 };
@@ -407,6 +496,8 @@ impl Shell {
                     self.free = Some((fx, fy));
                 }
             }
+        } else {
+            self.grab = None;
         }
 
         let targets = self.state.update(now, hovered, &self.timings);
@@ -460,12 +551,16 @@ impl Shell {
         // while dragging the shape sticks to the pointer.
         let (tx, ty) = self.target_anchor();
         let pos = anim::spring_vec2(&ctx, self.id.with("pos"), vec2(tx, ty), dragging);
-        let settling = self.free.is_none() && !self.dock.is_on() && pos.y.abs() > 0.002;
-        if self.settling && !settling {
-            // One more frame so the window can shrink back to its strip.
+        let top_edge = self.free.is_none() && !self.dock.is_on();
+        let away = (pos.x - tx).abs() > 1e-4 || (pos.y - ty).abs() > 1e-4;
+        let settling = top_edge && pos.y.abs() > 0.002;
+        let moving = dragging || (!top_edge && away);
+        if (self.settling && !settling) || (self.moving && !moving) {
+            // One more frame so the window can shrink back.
             ctx.request_repaint();
         }
         self.settling = settling;
+        self.moving = moving;
         // Slide into the dock edge while idle, out again when opened.
         let hide = anim::spring(
             &ctx,
@@ -480,6 +575,7 @@ impl Shell {
             hide,
             side: self.dock_side,
             rest_h: base.y,
+            origin,
         };
         let frac = pos.x;
         let shape = self.shape_at(window, vec2(w, h), progress, pose);
@@ -525,7 +621,7 @@ impl Shell {
         if self.dock.is_on() {
             let fade = (1.0 - progress / 0.25).clamp(0.0, 1.0) * opacity;
             if fade > 0.01 {
-                let visible_part = shape.rect.intersect(window);
+                let visible_part = shape.rect.intersect(real_window);
                 painter.rect_filled(
                     Rect::from_center_size(
                         pos2(visible_part.center().x, shape.rect.center().y),
@@ -613,5 +709,61 @@ mod tests {
         // ...and one in the right corner keeps its right edge.
         let pill = shell.shape_for(window, m.collapsed, 0.0, 1.0).rect;
         assert_eq!(pill.max.x, right.max.x);
+    }
+
+    #[test]
+    fn dragged_notch_gets_a_small_window() {
+        let mut shell = Shell::new(ShellMetrics::default(), ShellTimings::default());
+        let area = Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1040.0));
+        assert_eq!(shell.window_mode(), WindowMode::Strip);
+
+        shell.free = Some((0.5, 0.5));
+        assert_eq!(shell.window_mode(), WindowMode::Tight);
+        let r = shell.rest_bounds(area);
+        // Holds the open panel, but is nowhere near the whole screen.
+        assert!(r.width() >= shell.metrics.expanded.x);
+        assert!(r.height() >= shell.metrics.expanded.y);
+        assert!(r.width() < 900.0 && r.height() < 500.0);
+        assert!(area.contains_rect(r));
+
+        // Travelling or being dragged: the whole screen, only meanwhile.
+        shell.moving = true;
+        assert_eq!(shell.window_mode(), WindowMode::Full);
+    }
+
+    #[test]
+    fn docked_notch_window_stays_on_its_edge() {
+        let mut shell = Shell::new(ShellMetrics::default(), ShellTimings::default());
+        let area = Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1040.0));
+        shell.dock = Dock::Left;
+        shell.dock_side = Dock::Left;
+        let left = shell.rest_bounds(area);
+        assert_eq!(left.min.x, 0.0);
+        assert!(left.width() < 900.0);
+        shell.dock = Dock::Right;
+        shell.dock_side = Dock::Right;
+        let right = shell.rest_bounds(area);
+        assert_eq!(right.max.x, area.max.x);
+        assert!(right.width() < 900.0);
+    }
+
+    #[test]
+    fn panel_opened_low_on_screen_stays_inside_the_window() {
+        let mut shell = Shell::new(ShellMetrics::default(), ShellTimings::default());
+        let area = Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1040.0));
+        shell.free = Some((0.5, 1.0));
+        let r = shell.rest_bounds(area);
+        assert!(area.contains_rect(r));
+        let pose = Pose {
+            fx: 0.5,
+            fy: 1.0,
+            hide: 0.0,
+            side: Dock::Off,
+            rest_h: shell.metrics.collapsed.y,
+            origin: Vec2::ZERO,
+        };
+        let panel = shell.shape_at(area, shell.metrics.expanded, 1.0, pose).rect;
+        assert!(panel.max.y <= area.max.y);
+        assert!(r.contains_rect(panel));
     }
 }
