@@ -12,6 +12,7 @@ pub mod file_shelf;
 pub mod font_detector;
 pub mod kit;
 pub mod lens;
+pub mod lyrics;
 pub mod media;
 pub mod notes;
 pub mod phone_link;

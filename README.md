@@ -164,6 +164,7 @@ npx wrangler@4.153.0 d1 execute nook-stats --remote --file migrations/0002_usage
   collapse.
 - **Click** the glass (or empty space on any page), press **Ctrl+Alt+N**,
   or use the tray's **Pin open** to keep the panel open. A small pin shows at the top center.
+- **Lyrics and track details:** click the Media tile (outside its buttons) to open the Music page. It shows the album art, title, artist, album, album artist, track number, genre and length, with the lyrics beside them. Synced lyrics follow the song line by line; others scroll. Lyrics come from [LRCLIB](https://lrclib.net): when the page is open, the track's artist, title, album and length are sent to that site, and nothing is sent while the page is closed.
 - **Open on click:** Settings, Behavior, Open on: Click (or the tray's **Click to open**). The panel then opens only when you click the pill, not when you hover it.
 - **Hide to side:** Settings, Appearance, Hide to side: Left or Right (or the tray's **Hide to left/right edge**). The notch shrinks to a thin tab on that screen edge and slides out when you hover it (or click it, with Open on: Click). Drag the tab up or down to move it along the edge.
 - **Drag it anywhere:** with Hide to side off, drag the pill or the panel's background to put the notch anywhere on the screen. The spot is remembered. Picking a Position in Settings, or the tray's **Reset position**, puts it back on the top edge.

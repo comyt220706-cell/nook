@@ -38,6 +38,13 @@ pub struct NowPlaying {
     pub source: String,
     pub title: String,
     pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    /// 1-based position on the album; 0 when the app does not say.
+    pub track_number: u32,
+    /// Tracks on the album; 0 when unknown.
+    pub album_track_count: u32,
+    pub genres: Vec<String>,
     pub playing: bool,
     pub can_previous: bool,
     pub can_next: bool,
@@ -258,12 +265,28 @@ fn snapshot(
         .AlbumTitle()
         .map(|h| h.to_string())
         .unwrap_or_default();
+    let album_artist = props
+        .AlbumArtist()
+        .map(|h| h.to_string())
+        .unwrap_or_default();
+    let count = |n: windows::core::Result<i32>| n.ok().and_then(|n| u32::try_from(n).ok());
+    let track_number = count(props.TrackNumber()).unwrap_or(0);
+    let album_track_count = count(props.AlbumTrackCount()).unwrap_or(0);
+    let genres: Vec<String> = props
+        .Genres()
+        .map(|g| {
+            g.into_iter()
+                .map(|h| h.to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
 
     let info = session.GetPlaybackInfo().api("GetPlaybackInfo")?;
     let playing = info.PlaybackStatus().ok() == Some(Status::Playing);
     let controls = info.Controls().api("PlaybackInfo.Controls")?;
 
-    let key = (title.clone(), artist.clone(), album);
+    let key = (title.clone(), artist.clone(), album.clone());
     let art = match art_cache {
         Some((k, art)) if *k == key => art.clone(),
         _ => {
@@ -280,6 +303,11 @@ fn snapshot(
         source: clean_source(id),
         title,
         artist,
+        album,
+        album_artist,
+        track_number,
+        album_track_count,
+        genres,
         playing,
         can_previous: controls.IsPreviousEnabled().unwrap_or(false),
         can_next: controls.IsNextEnabled().unwrap_or(false),
@@ -388,6 +416,11 @@ mod tests {
             source: String::new(),
             title: String::new(),
             artist: String::new(),
+            album: String::new(),
+            album_artist: String::new(),
+            track_number: 0,
+            album_track_count: 0,
+            genres: Vec::new(),
             playing: false,
             can_previous: false,
             can_next: false,
